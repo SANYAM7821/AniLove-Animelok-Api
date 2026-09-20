@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     rate_limit_requests: int = 120
     rate_limit_window_seconds: int = 60
 
+    # Proxy Settings
+    proxy_list: str | None = Field(default=None, alias="PROXY_LIST")
+    use_proxy: bool = Field(default=False, alias="USE_PROXY")
+
+    # Redis Settings (for caching)
+    redis_url: str | None = Field(default=None, alias="REDIS_URL")
+
+    # Supabase Settings (for AniList mappings)
+    supabase_url: str | None = Field(default=None, alias="SUPABASE_URL")
+    supabase_key: str | None = Field(default=None, alias="SUPABASE_KEY")
+
     @property
     def normalized_base_url(self) -> str:
         """Return BASE_URL without a trailing slash."""
