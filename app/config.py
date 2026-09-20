@@ -11,9 +11,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_name: str = "Animelok Server Scraper API"
-    version: str = "1.0.0"
-    base_url: str = Field(default="https://animelok.online", alias="BASE_URL")
+    app_name: str = "AnimeWorld India Scraper API"
+    version: str = "1.1.0"
+    base_url: str = Field(default="https://animeworld-india.me", alias="BASE_URL")
     request_timeout: float = 20.0
     request_retries: int = 3
     cache_ttl_seconds: int = 300

@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from app.services.anilist import AniListClient, AniListMappingStore, normalize_detail, title_candidates
-from app.scrapers.animelok import AnimelokScraper
+from app.scrapers.animeworld import AnimeworldScraper
 from app.utils.exceptions import NotFoundError
 
 
@@ -15,11 +15,11 @@ class AnimeService:
 
     def __init__(
         self,
-        scraper: AnimelokScraper | None = None,
+        scraper: AnimeworldScraper | None = None,
         anilist: AniListClient | None = None,
         mappings: AniListMappingStore | None = None,
     ) -> None:
-        self.scraper = scraper or AnimelokScraper()
+        self.scraper = scraper or AnimeworldScraper()
         self.anilist = anilist or AniListClient()
         self.mappings = mappings or AniListMappingStore()
 
@@ -126,12 +126,16 @@ class AnimeService:
         if mapped:
             try:
                 detail = await self.scraper.info(mapped)
+                # If site explicitly says it's this AniList ID, we are sure
                 if int(detail.get("anilist_id") or 0) == anilist_id:
                     return detail
+                # Otherwise, if it was already mapped in our DB, trust the map
+                return detail
             except Exception:
                 pass
 
-        for title in title_candidates(media):
+        titles = title_candidates(media)
+        for title in titles:
             for result in await self.scraper.search(title):
                 provider_id = str(result.get("anime_id") or "")
                 if not provider_id:
@@ -140,7 +144,16 @@ class AnimeService:
                     detail = await self.scraper.info(provider_id)
                 except Exception:
                     continue
-                if int(detail.get("anilist_id") or 0) == anilist_id:
+
+                # Verification: site ID match or title fuzzy match
+                site_anilist_id = int(detail.get("anilist_id") or 0)
+                if site_anilist_id == anilist_id:
+                    await self.mappings.set(anilist_id, provider_id)
+                    return detail
+
+                # Fuzzy title match fallback
+                provider_title = str(detail.get("title") or "").lower()
+                if any(t.lower() in provider_title or provider_title in t.lower() for t in titles):
                     await self.mappings.set(anilist_id, provider_id)
                     return detail
 
