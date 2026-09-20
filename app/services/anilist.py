@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.cache.memory import cache
+from app.config import settings
 from app.utils.http import http_client
 
 logger = logging.getLogger(__name__)
