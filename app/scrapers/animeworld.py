@@ -172,47 +172,52 @@ class AnimeworldScraper:
         }
 
     def _parse_grid(self, html: str, section: str | None = None) -> list[dict[str, Any]]:
-        """Parse the WordPress-style grid."""
+        """Parse the WordPress-style grid with aggressive detection."""
         tree = HTMLParser(html)
         results = []
 
-        # If section is provided, try to scope the search
-        container = tree
-        if section:
-            # Look for heading then following container
-            for h in tree.css("h2, h3"):
-                if section.lower() in h.text().lower():
-                    # Find the next div or ul that looks like a grid
-                    container = h.next
-                    while container and container.tag not in ["div", "ul"]:
-                        container = container.next
-                    break
+        # Find all potential anime links (series or movies)
+        # We look for the main containers first, then fall back to all links
+        items = tree.css("li.status-publish, .post-lst li, .result-item, .item, article")
+        if not items:
+            # Absolute fallback: just find any link that looks like an anime page
+            items = tree.css("a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/']")
 
-        if not container:
-            container = tree
+        for item in items:
+            # If item is already the link, use it; otherwise find the link inside
+            if item.tag == "a":
+                link_node = item
+            else:
+                link_node = item.css_first("a.lnk-blk, a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/']")
 
-        for item in container.css("li.status-publish, .post-lst li, .result-item"):
-            link_node = item.css_first("a.lnk-blk, a[href*='/series/'], a[href*='/movies/']")
             if not link_node:
                 continue
 
             href = link_node.attributes.get("href", "")
-            anime_id = href.rstrip("/").split("/")[-1]
+            if not href or "/genre/" in href or "/category/" in href:
+                continue
 
-            title_node = item.css_first(".entry-title, h2, h3")
-            title = title_node.text().strip() if title_node else "Unknown"
+            anime_id = href.rstrip("/").split("/")[-1]
+            if not anime_id:
+                continue
+
+            # Find title in headings or alt text
+            title_node = item.css_first(".entry-title, h2, h3, h4")
+            if not title_node and item.tag != "a":
+                title_node = item
+
+            title = title_node.text().strip() if title_node else ""
+            if not title:
+                img_node = item.css_first("img")
+                title = img_node.attributes.get("alt", "").strip() if img_node else anime_id
 
             img_node = item.css_first("img")
-            poster = img_node.attributes.get("src") if img_node else None
-
-            year_node = item.css_first(".year, .date")
-            year = int(year_node.text()) if year_node and year_node.text().isdigit() else None
+            poster = img_node.attributes.get("src") or img_node.attributes.get("data-src") if img_node else None
 
             results.append({
                 "anime_id": anime_id,
                 "title": title,
                 "poster": poster,
-                "year": year,
                 "type": "movie" if "/movie" in href else "series"
             })
 
