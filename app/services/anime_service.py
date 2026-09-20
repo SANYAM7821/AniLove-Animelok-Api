@@ -123,56 +123,70 @@ class AnimeService:
 
     async def _provider_detail_for(self, anilist_id: int, media: dict[str, Any], *, required: bool) -> dict[str, Any] | None:
         import logging
+        import re
         logger = logging.getLogger(__name__)
 
         mapped = await self.mappings.get(anilist_id)
         if mapped:
             try:
                 detail = await self.scraper.info(mapped)
-                # If site explicitly says it's this AniList ID, we are sure
-                if int(detail.get("anilist_id") or 0) == anilist_id:
-                    return detail
-                # Otherwise, if it was already mapped in our DB, trust the map
                 return detail
             except Exception as e:
                 logger.warning(f"Failed to use mapped provider {mapped}: {e}")
 
         titles = title_candidates(media)
-        logger.info(f"Mapping AniList {anilist_id}. Candidate titles: {titles}")
+        # Add slugified titles as direct candidates (Guessing Strategy)
+        slug_candidates = []
+        for t in titles:
+            slug = re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
+            if slug and slug not in slug_candidates:
+                slug_candidates.append(slug)
 
-        for title in titles:
-            results = await self.scraper.search(title)
-            logger.info(f"Search for '{title}' returned {len(results)} results")
+        logger.info(f"Mapping AniList {anilist_id}. Candidate titles: {titles}. Slug candidates: {slug_candidates}")
 
-            for result in results:
-                provider_id = str(result.get("anime_id") or "")
-                if not provider_id:
-                    continue
-                try:
-                    detail = await self.scraper.info(provider_id)
-                except Exception as e:
-                    logger.warning(f"Failed to get info for {provider_id}: {e}")
-                    continue
-
-                # Verification: site ID match or title fuzzy match
+        # Strategy 1: Try direct slug access (Fast & Highly Accurate)
+        for slug in slug_candidates:
+            try:
+                detail = await self.scraper.info(slug)
+                # Verify it's a match (site ID or fuzzy title)
                 site_anilist_id = int(detail.get("anilist_id") or 0)
                 provider_title = str(detail.get("title") or "").lower()
 
-                logger.info(f"Checking provider {provider_id} ('{provider_title}'). Site AniList ID: {site_anilist_id}")
-
-                if site_anilist_id == anilist_id:
-                    logger.info(f"Found exact mapping match for {anilist_id} -> {provider_id}")
-                    await self.mappings.set(anilist_id, provider_id)
+                if site_anilist_id == anilist_id or any(t.lower() in provider_title or provider_title in t.lower() for t in titles):
+                    logger.info(f"Found match via direct slug guess: {slug}")
+                    await self.mappings.set(anilist_id, slug)
                     return detail
+            except Exception:
+                continue
 
-                # Fuzzy title match fallback
-                if any(t.lower() in provider_title or provider_title in t.lower() for t in titles):
-                    logger.info(f"Found fuzzy mapping match for {anilist_id} -> {provider_id}")
-                    await self.mappings.set(anilist_id, provider_id)
-                    return detail
+        # Strategy 2: Search-based discovery
+        for title in titles:
+            # Search for first 2 words if title is long (Resilience)
+            words = title.split()
+            search_queries = [title]
+            if len(words) > 3:
+                search_queries.append(" ".join(words[:2]))
+
+            for query in search_queries:
+                results = await self.scraper.search(query)
+                for result in results:
+                    provider_id = str(result.get("anime_id") or "")
+                    if not provider_id:
+                        continue
+                    try:
+                        detail = await self.scraper.info(provider_id)
+                        site_anilist_id = int(detail.get("anilist_id") or 0)
+                        provider_title = str(detail.get("title") or "").lower()
+
+                        if site_anilist_id == anilist_id or any(t.lower() in provider_title or provider_title in t.lower() for t in titles):
+                            logger.info(f"Found mapping match via search: {provider_id}")
+                            await self.mappings.set(anilist_id, provider_id)
+                            return detail
+                    except Exception:
+                        continue
 
         if required:
-            raise NotFoundError(f"Could not map AniList ID {anilist_id} to a provider anime. Tried search for: {titles}")
+            raise NotFoundError(f"Could not map AniList ID {anilist_id} to a provider anime. Tried slugs: {slug_candidates} and search for: {titles}")
         return None
 
 

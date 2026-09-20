@@ -84,20 +84,29 @@ class AnimeworldScraper:
         return await cache.get_or_set(key, factory)
 
     async def info(self, anime_id: str) -> dict[str, Any]:
-        """Return anime details."""
+        """Return anime details with prefix guessing."""
 
         key = f"info:{anime_id}"
 
         async def factory() -> dict[str, Any]:
-            # AnimeWorld IDs are usually slugs.
-            # We try series first, then movies.
-            try:
-                html = await http_client.get_text(self.url(f"/series/{anime_id}"))
-            except Exception:
+            # Guess prefixes in order of probability
+            prefixes = ["/series/", "/movies/", "/anime/", "/movie/"]
+            html = None
+            found_url = ""
+
+            for prefix in prefixes:
                 try:
-                    html = await http_client.get_text(self.url(f"/movies/{anime_id}"))
+                    curr_url = self.url(f"{prefix}{anime_id}")
+                    resp = await http_client.get(curr_url)
+                    if resp.status_code == 200:
+                        html = resp.text
+                        found_url = curr_url
+                        break
                 except Exception:
-                    raise NotFoundError(f"Anime not found: {anime_id}")
+                    continue
+
+            if not html:
+                raise NotFoundError(f"Anime not found: {anime_id}")
 
             return self._parse_detail(anime_id, html)
 
@@ -219,6 +228,8 @@ class AnimeworldScraper:
         if not links:
             logger.warning(f"No anime links found in grid parsing. HTML snippet: {html[:500]}")
             return []
+
+        logger.info(f"Grid parsing found {len(links)} candidate links. Sample: {[l.attributes.get('href') for l in links[:3]]}")
 
         for link_node in links:
             href = link_node.attributes.get("href", "")
