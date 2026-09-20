@@ -83,6 +83,43 @@ class HttpClient:
             headers["Referer"] = referer
         return headers
 
+    async def get_text(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> str:
+        """GET a URL and return text."""
+
+        response = await self.get(url, headers=headers, params=params)
+        return response.text
+
+    async def get_json(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """GET a URL and return parsed JSON."""
+
+        response = await self.get(url, headers=headers, params=params)
+        return response.json()
+
+    async def post_json(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        data: Mapping[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """POST form data and return parsed JSON."""
+
+        response = await self.post(url, headers=headers, data=data, json=json)
+        return response.json()
+
     async def get(
         self,
         url: str,
