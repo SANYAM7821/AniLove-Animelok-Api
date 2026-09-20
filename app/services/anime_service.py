@@ -122,6 +122,9 @@ class AnimeService:
         return int(anilist_id)
 
     async def _provider_detail_for(self, anilist_id: int, media: dict[str, Any], *, required: bool) -> dict[str, Any] | None:
+        import logging
+        logger = logging.getLogger(__name__)
+
         mapped = await self.mappings.get(anilist_id)
         if mapped:
             try:
@@ -131,34 +134,45 @@ class AnimeService:
                     return detail
                 # Otherwise, if it was already mapped in our DB, trust the map
                 return detail
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to use mapped provider {mapped}: {e}")
 
         titles = title_candidates(media)
+        logger.info(f"Mapping AniList {anilist_id}. Candidate titles: {titles}")
+
         for title in titles:
-            for result in await self.scraper.search(title):
+            results = await self.scraper.search(title)
+            logger.info(f"Search for '{title}' returned {len(results)} results")
+
+            for result in results:
                 provider_id = str(result.get("anime_id") or "")
                 if not provider_id:
                     continue
                 try:
                     detail = await self.scraper.info(provider_id)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to get info for {provider_id}: {e}")
                     continue
 
                 # Verification: site ID match or title fuzzy match
                 site_anilist_id = int(detail.get("anilist_id") or 0)
+                provider_title = str(detail.get("title") or "").lower()
+
+                logger.info(f"Checking provider {provider_id} ('{provider_title}'). Site AniList ID: {site_anilist_id}")
+
                 if site_anilist_id == anilist_id:
+                    logger.info(f"Found exact mapping match for {anilist_id} -> {provider_id}")
                     await self.mappings.set(anilist_id, provider_id)
                     return detail
 
                 # Fuzzy title match fallback
-                provider_title = str(detail.get("title") or "").lower()
                 if any(t.lower() in provider_title or provider_title in t.lower() for t in titles):
+                    logger.info(f"Found fuzzy mapping match for {anilist_id} -> {provider_id}")
                     await self.mappings.set(anilist_id, provider_id)
                     return detail
 
         if required:
-            raise NotFoundError(f"Could not map AniList ID {anilist_id} to a provider anime")
+            raise NotFoundError(f"Could not map AniList ID {anilist_id} to a provider anime. Tried search for: {titles}")
         return None
 
 
