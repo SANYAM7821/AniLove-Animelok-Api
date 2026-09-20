@@ -217,39 +217,42 @@ class AnimeworldScraper:
         }
 
     def _parse_grid(self, html: str, section: str | None = None) -> list[dict[str, Any]]:
-        """Parse the WordPress-style grid with aggressive detection."""
+        """Parse the WordPress-style grid with extreme detection."""
         tree = HTMLParser(html)
         results = []
         seen = set()
 
-        # Find every single link that looks like an anime series or movie
-        links = tree.css("a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/']")
+        # Strategy: Find EVERY link on the page
+        links = tree.css("a[href]")
 
-        if not links:
-            logger.warning(f"No anime links found in grid parsing. HTML snippet: {html[:500]}")
-            return []
-
-        logger.info(f"Grid parsing found {len(links)} candidate links. Sample: {[l.attributes.get('href') for l in links[:3]]}")
+        # Noise filters: URLs that are definitely NOT anime
+        noise = {
+            "whatsapp", "telegram", "facebook", "twitter", "instagram", "youtube", "discord",
+            "/genre/", "/category/", "/tag/", "/author/", "/page/", "/dmca", "/contact",
+            "/privacy", "/terms", "/about", "/disclaimer", "/membership", "/login", "/register",
+            "/search", "javascript:", "#", ".com/", ".me/", ".net/", ".org/"
+        }
 
         for link_node in links:
             href = link_node.attributes.get("href", "")
-            # Skip noise links
-            if not href or any(x in href for x in ["/genre/", "/category/", "/tag/", "/author/", "/page/", "/whatsapp"]):
+            if not href or any(x in href.lower() for x in noise):
                 continue
 
-            anime_id = href.rstrip("/").split("/")[-1]
-            if not anime_id or anime_id in seen or anime_id.isdigit():
+            # Clean the ID/Slug
+            path = href.rstrip("/").split("/")[-1]
+            if not path or path in seen or path.isdigit() or len(path) < 3:
                 continue
-            seen.add(anime_id)
+            seen.add(path)
 
             # Find title
             title = ""
-            # Try to find title in a parent container first
             parent = link_node.parent
+            title_node = None
             if parent:
                 title_node = parent.css_first(".entry-title, h2, h3, h4, .title, .name")
-                if title_node:
-                    title = title_node.text().strip()
+
+            if title_node:
+                title = title_node.text().strip()
 
             if not title:
                 title = link_node.text().strip()
@@ -258,7 +261,7 @@ class AnimeworldScraper:
                 img_node = link_node.css_first("img")
                 if not img_node and parent:
                     img_node = parent.css_first("img")
-                title = img_node.attributes.get("alt", "").strip() if img_node else anime_id
+                title = img_node.attributes.get("alt", "").strip() if img_node else path
 
             img_node = link_node.css_first("img")
             poster = None
@@ -266,14 +269,49 @@ class AnimeworldScraper:
                 poster = img_node.attributes.get("src") or img_node.attributes.get("data-src")
 
             results.append({
-                "anime_id": anime_id,
-                "title": title or anime_id,
+                "anime_id": path,
+                "title": title or path,
                 "poster": poster,
-                "type": "movie" if "/movie" in href else "series"
+                "type": "movie" if "movie" in href.lower() else "series"
             })
 
-        logger.info(f"Aggressive Grid Parser found {len(results)} items")
+        logger.info(f"Extreme Grid Parser found {len(results)} potential items")
         return results
+
+    async def info(self, anime_id: str) -> dict[str, Any]:
+        """Return anime details with multi-prefix and search retry."""
+
+        key = f"info:{anime_id}"
+
+        async def factory() -> dict[str, Any]:
+            # Try direct, then with common prefixes
+            prefixes = ["/", "/series/", "/movies/", "/anime/", "/movie/", "/watch/"]
+            html = None
+
+            for prefix in prefixes:
+                try:
+                    curr_url = self.url(f"{prefix}{anime_id}")
+                    # Use the actual client to avoid missing method issues
+                    resp = await http_client.get(curr_url)
+                    if resp.status_code == 200:
+                        html = resp.text
+                        break
+                except Exception:
+                    continue
+
+            if not html:
+                # If we still haven't found it, try a search attempt for the ID itself
+                search_results = await self.search(anime_id.replace("-", " "))
+                if search_results:
+                    new_id = search_results[0]["anime_id"]
+                    if new_id != anime_id:
+                        return await self.info(new_id)
+
+                raise NotFoundError(f"Anime not found: {anime_id}")
+
+            return self._parse_detail(anime_id, html)
+
+        return await cache.get_or_set(key, factory)
 
     def _parse_detail(self, anime_id: str, html: str) -> dict[str, Any]:
         """Parse the anime detail page with safety fallbacks."""
