@@ -44,13 +44,28 @@ class AnimeworldScraper:
         return await cache.get_or_set("home", factory)
 
     async def search(self, query: str) -> list[dict[str, Any]]:
-        """Search anime by keyword."""
+        """Search anime by keyword with multiple attempts."""
 
         key = f"search:{query.lower().strip()}"
 
         async def factory() -> list[dict[str, Any]]:
+            # Attempt 1: Standard search
             html = await http_client.get_text(self.url(f"/?s={quote(query)}"))
-            return self._parse_grid(html)
+            results = self._parse_grid(html)
+
+            # Attempt 2: If no results, try searching without non-alphanumeric chars
+            if not results:
+                clean_query = re.sub(r"[^a-zA-Z0-9\s]", "", query)
+                if clean_query != query:
+                    html = await http_client.get_text(self.url(f"/?s={quote(clean_query)}"))
+                    results = self._parse_grid(html)
+
+            # Attempt 3: Try appending "Hindi" for this specific site focus
+            if not results:
+                html = await http_client.get_text(self.url(f"/?s={quote(query + ' Hindi')}"))
+                results = self._parse_grid(html)
+
+            return results
 
         return await cache.get_or_set(key, factory)
 
@@ -120,25 +135,40 @@ class AnimeworldScraper:
         ]
 
     async def stream(self, episode_id: str, server: str = "multi") -> dict[str, Any]:
-        """Resolve a stream URL."""
+        """Resolve a stream URL with multiple slug patterns."""
         provider_id, episode_number = self.split_episode_id(episode_id)
 
-        # Try both /watch/ and /episode/ patterns
-        watch_slug = f"{provider_id}-episode-{episode_number}"
-        try:
-            html = await http_client.get_text(self.url(f"/watch/{watch_slug}"))
-        except Exception:
-            try:
-                html = await http_client.get_text(self.url(f"/episode/{watch_slug}"))
-            except Exception:
-                raise StreamExtractionError(f"Unable to load watch page for {watch_slug}")
+        # Try common URL patterns for watch pages
+        candidates = [
+            f"{provider_id}-episode-{episode_number}",
+            f"{provider_id}-s1-{episode_number}",
+            f"{provider_id}-{episode_number}",
+            provider_id # Sometimes the movie ID is just the provider ID
+        ]
+
+        html = None
+        watch_url = ""
+        for slug in candidates:
+            for prefix in ["/watch/", "/episode/", "/movie/"]:
+                try:
+                    curr_url = self.url(f"{prefix}{slug}")
+                    html = await http_client.get_text(curr_url)
+                    watch_url = curr_url
+                    break
+                except Exception:
+                    continue
+            if html:
+                break
+
+        if not html:
+            raise StreamExtractionError(f"Unable to load watch page for {provider_id} episode {episode_number}")
 
         tree = HTMLParser(html)
 
         # Look for the iframe in common WordPress video players
         iframe = tree.css_first("iframe[src]")
         if not iframe:
-             iframe = tree.css_first(".video-embed iframe, #video-player iframe, .player-embed iframe")
+             iframe = tree.css_first(".video-embed iframe, #video-player iframe, .player-embed iframe, .entry-content iframe")
 
         stream_url = iframe.attributes.get("src") if iframe else None
 
@@ -148,11 +178,17 @@ class AnimeworldScraper:
 
         if not stream_url:
             # Check for direct video tags
-            video = tree.css_first("video source")
+            video = tree.css_first("video source, video")
             stream_url = video.attributes.get("src") if video else None
 
         if not stream_url:
-            raise StreamExtractionError(f"No stream found for {watch_slug}")
+            # Check for links that look like video files
+            for a in tree.css("a[href*='.m3u8'], a[href*='.mp4'], a[href*='drive.google.com'], a[href*='vidmoly']"):
+                stream_url = a.attributes.get("href")
+                break
+
+        if not stream_url:
+            raise StreamExtractionError(f"No stream found for {provider_id} in {watch_url}")
 
         # Resolve relative URLs
         if stream_url.startswith("//"):
@@ -168,7 +204,7 @@ class AnimeworldScraper:
             "outro": {},
             "qualities": [],
             "server": server,
-            "headers": {"Referer": self.url(f"/watch/{watch_slug}")}
+            "headers": {"Referer": watch_url}
         }
 
     def _parse_grid(self, html: str, section: str | None = None) -> list[dict[str, Any]]:
@@ -177,48 +213,46 @@ class AnimeworldScraper:
         results = []
         seen = set()
 
-        # Target common WordPress anime theme containers
-        items = tree.css("article, .post-card, .item, .result-item, li.status-publish, .post-lst li, .anim-card, .card")
+        # Find every single link that looks like an anime series or movie
+        links = tree.css("a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/']")
 
-        # If no containers, just find all anime links
-        if not items:
-            items = tree.css("a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/']")
+        if not links:
+            logger.warning(f"No anime links found in grid parsing. HTML snippet: {html[:500]}")
+            return []
 
-        for item in items:
-            if item.tag == "a":
-                link_node = item
-            else:
-                link_node = item.css_first("a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/'], a.lnk-blk")
-
-            if not link_node:
-                continue
-
+        for link_node in links:
             href = link_node.attributes.get("href", "")
-            if not href or any(x in href for x in ["/genre/", "/category/", "/tag/", "/author/", "/page/"]):
+            # Skip noise links
+            if not href or any(x in href for x in ["/genre/", "/category/", "/tag/", "/author/", "/page/", "/whatsapp"]):
                 continue
 
             anime_id = href.rstrip("/").split("/")[-1]
-            if not anime_id or anime_id in seen:
+            if not anime_id or anime_id in seen or anime_id.isdigit():
                 continue
             seen.add(anime_id)
 
-            # Aggressive Title Finding
+            # Find title
             title = ""
-            title_node = item.css_first(".entry-title, h2, h3, h4, .title, .name")
-            if title_node:
-                title = title_node.text().strip()
+            # Try to find title in a parent container first
+            parent = link_node.parent
+            if parent:
+                title_node = parent.css_first(".entry-title, h2, h3, h4, .title, .name")
+                if title_node:
+                    title = title_node.text().strip()
 
             if not title:
-                img_node = item.css_first("img")
-                title = img_node.attributes.get("alt", "").strip() if img_node else ""
+                title = link_node.text().strip()
 
-            if not title and item.tag == "a":
-                title = item.text().strip()
+            if not title:
+                img_node = link_node.css_first("img")
+                if not img_node and parent:
+                    img_node = parent.css_first("img")
+                title = img_node.attributes.get("alt", "").strip() if img_node else anime_id
 
-            img_node = item.css_first("img")
+            img_node = link_node.css_first("img")
             poster = None
             if img_node:
-                poster = img_node.attributes.get("src") or img_node.attributes.get("data-src") or img_node.attributes.get("data-lazy-src")
+                poster = img_node.attributes.get("src") or img_node.attributes.get("data-src")
 
             results.append({
                 "anime_id": anime_id,
@@ -227,7 +261,7 @@ class AnimeworldScraper:
                 "type": "movie" if "/movie" in href else "series"
             })
 
-        logger.info(f"Parsed {len(results)} anime from grid")
+        logger.info(f"Aggressive Grid Parser found {len(results)} items")
         return results
 
     def _parse_detail(self, anime_id: str, html: str) -> dict[str, Any]:
@@ -252,14 +286,23 @@ class AnimeworldScraper:
 
         episodes = []
         # Find all watch/episode links
-        for ep_node in tree.css("a[href*='/episode/'], a[href*='/watch/'], .episode-link"):
+        # More robust selector for episode lists
+        ep_nodes = tree.css("a[href*='/episode/'], a[href*='/watch/'], .episode-link, .season-card a")
+        for ep_node in ep_nodes:
             ep_href = ep_node.attributes.get("href", "")
-            if not ep_href or "/series/" in ep_href:
+            if not ep_href or "/series/" in ep_href or "/movie/" in ep_href:
                 continue
 
             ep_id = ep_href.rstrip("/").split("/")[-1]
+            if not ep_id:
+                continue
+
             # Try to extract episode number
-            num_match = re.search(r"episode-(\d+)", ep_id)
+            num_match = re.search(r"(?:episode|ep)-?(\d+)", ep_id, re.I)
+            if not num_match:
+                # Try text content
+                num_match = re.search(r"(\d+)", ep_node.text())
+
             ep_num = int(num_match.group(1)) if num_match else 1
 
             episodes.append({
@@ -268,13 +311,19 @@ class AnimeworldScraper:
                 "title": ep_node.text().strip() or f"Episode {ep_num}"
             })
 
+        # Remove duplicates
+        seen_eps = {}
+        for ep in episodes:
+            if ep["number"] not in seen_eps:
+                seen_eps[ep["number"]] = ep
+
         return {
             "anime_id": anime_id,
             "title": title,
             "poster": poster,
             "synopsis": description,
             "anilist_id": anilist_id,
-            "episodes_list": sorted(episodes, key=lambda x: x["number"])
+            "episodes_list": sorted(seen_eps.values(), key=lambda x: x["number"])
         }
 
     def _parse_genres(self, html: str) -> list[str]:
