@@ -175,10 +175,10 @@ class AnimeworldScraper:
         """Parse the WordPress-style grid with aggressive detection."""
         tree = HTMLParser(html)
         results = []
+        seen = set()
 
         # Target common WordPress anime theme containers
-        # .post-card, article, .item, .result-item, etc.
-        items = tree.css("article, .post-card, .item, .result-item, li.status-publish, .post-lst li")
+        items = tree.css("article, .post-card, .item, .result-item, li.status-publish, .post-lst li, .anim-card, .card")
 
         # If no containers, just find all anime links
         if not items:
@@ -194,16 +194,17 @@ class AnimeworldScraper:
                 continue
 
             href = link_node.attributes.get("href", "")
-            if not href or any(x in href for x in ["/genre/", "/category/", "/tag/", "/author/"]):
+            if not href or any(x in href for x in ["/genre/", "/category/", "/tag/", "/author/", "/page/"]):
                 continue
 
             anime_id = href.rstrip("/").split("/")[-1]
-            if not anime_id:
+            if not anime_id or anime_id in seen:
                 continue
+            seen.add(anime_id)
 
             # Aggressive Title Finding
             title = ""
-            title_node = item.css_first(".entry-title, h2, h3, h4, .title")
+            title_node = item.css_first(".entry-title, h2, h3, h4, .title, .name")
             if title_node:
                 title = title_node.text().strip()
 
@@ -226,6 +227,7 @@ class AnimeworldScraper:
                 "type": "movie" if "/movie" in href else "series"
             })
 
+        logger.info(f"Parsed {len(results)} anime from grid")
         return results
 
     def _parse_detail(self, anime_id: str, html: str) -> dict[str, Any]:
