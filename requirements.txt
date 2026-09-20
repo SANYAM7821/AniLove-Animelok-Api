@@ -8,6 +8,7 @@ orjson
 python-multipart
 cachetools
 redis
+supabase
 fake-useragent
 aiofiles
 pydantic-settings

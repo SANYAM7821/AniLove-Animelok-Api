@@ -63,18 +63,66 @@ class AniListClient:
 
 
 class AniListMappingStore:
-    """Persistent AniList ID to provider slug mapping store."""
+    """Persistent AniList ID to provider slug mapping store using Supabase or local JSON."""
 
     def __init__(self, path: Path = MAPPING_PATH) -> None:
         self.path = path
         self._lock = asyncio.Lock()
+        self._supabase = None
+        self._url = settings.supabase_url
+        self._key = settings.supabase_key
+
+    def _get_supabase(self):
+        if not self._url or not self._key:
+            return None
+        if self._supabase is None:
+            try:
+                from supabase import create_client
+                self._supabase = create_client(self._url, self._key)
+                logger.info("Connected to Supabase mapping store")
+            except Exception as e:
+                logger.warning(f"Failed to connect to Supabase: {e}")
+                self._supabase = False
+        return self._supabase if self._supabase is not False else None
 
     async def get(self, anilist_id: int) -> str | None:
+        # 1. Try Supabase
+        client = self._get_supabase()
+        if client:
+            try:
+                # Run in thread because supabase-py is synchronous
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: client.table("mappings").select("provider_id").eq("anilist_id", anilist_id).execute()
+                )
+                if result.data:
+                    return result.data[0]["provider_id"]
+            except Exception as e:
+                logger.warning(f"Supabase get failed: {e}")
+
+        # 2. Fallback to local
         async with self._lock:
             mappings = self._read()
             return mappings.get(str(anilist_id))
 
     async def set(self, anilist_id: int, provider_id: str) -> None:
+        # 1. Save to Supabase
+        client = self._get_supabase()
+        if client:
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: client.table("mappings").upsert({
+                        "anilist_id": anilist_id,
+                        "provider_id": provider_id
+                    }).execute()
+                )
+            except Exception as e:
+                logger.warning(f"Supabase set failed: {e}")
+
+        # 2. Save to local
         async with self._lock:
             mappings = self._read()
             mappings[str(anilist_id)] = provider_id
