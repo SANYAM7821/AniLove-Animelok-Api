@@ -176,47 +176,52 @@ class AnimeworldScraper:
         tree = HTMLParser(html)
         results = []
 
-        # Find all potential anime links (series or movies)
-        # We look for the main containers first, then fall back to all links
-        items = tree.css("li.status-publish, .post-lst li, .result-item, .item, article")
+        # Target common WordPress anime theme containers
+        # .post-card, article, .item, .result-item, etc.
+        items = tree.css("article, .post-card, .item, .result-item, li.status-publish, .post-lst li")
+
+        # If no containers, just find all anime links
         if not items:
-            # Absolute fallback: just find any link that looks like an anime page
             items = tree.css("a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/']")
 
         for item in items:
-            # If item is already the link, use it; otherwise find the link inside
             if item.tag == "a":
                 link_node = item
             else:
-                link_node = item.css_first("a.lnk-blk, a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/']")
+                link_node = item.css_first("a[href*='/series/'], a[href*='/movies/'], a[href*='/anime/'], a.lnk-blk")
 
             if not link_node:
                 continue
 
             href = link_node.attributes.get("href", "")
-            if not href or "/genre/" in href or "/category/" in href:
+            if not href or any(x in href for x in ["/genre/", "/category/", "/tag/", "/author/"]):
                 continue
 
             anime_id = href.rstrip("/").split("/")[-1]
             if not anime_id:
                 continue
 
-            # Find title in headings or alt text
-            title_node = item.css_first(".entry-title, h2, h3, h4")
-            if not title_node and item.tag != "a":
-                title_node = item
+            # Aggressive Title Finding
+            title = ""
+            title_node = item.css_first(".entry-title, h2, h3, h4, .title")
+            if title_node:
+                title = title_node.text().strip()
 
-            title = title_node.text().strip() if title_node else ""
             if not title:
                 img_node = item.css_first("img")
-                title = img_node.attributes.get("alt", "").strip() if img_node else anime_id
+                title = img_node.attributes.get("alt", "").strip() if img_node else ""
+
+            if not title and item.tag == "a":
+                title = item.text().strip()
 
             img_node = item.css_first("img")
-            poster = img_node.attributes.get("src") or img_node.attributes.get("data-src") if img_node else None
+            poster = None
+            if img_node:
+                poster = img_node.attributes.get("src") or img_node.attributes.get("data-src") or img_node.attributes.get("data-lazy-src")
 
             results.append({
                 "anime_id": anime_id,
-                "title": title,
+                "title": title or anime_id,
                 "poster": poster,
                 "type": "movie" if "/movie" in href else "series"
             })
@@ -224,26 +229,36 @@ class AnimeworldScraper:
         return results
 
     def _parse_detail(self, anime_id: str, html: str) -> dict[str, Any]:
-        """Parse the anime detail page."""
+        """Parse the anime detail page with safety fallbacks."""
         tree = HTMLParser(html)
 
-        title = tree.css_first(".entry-title, h1").text().strip()
-        poster = tree.css_first(".post-thumbnail img, .poster img").attributes.get("src")
-        description = tree.css_first(".description, .entry-content p").text().strip()
+        title_node = tree.css_first(".entry-title, h1, .title")
+        title = title_node.text().strip() if title_node else anime_id
 
-        # AniList ID is often in meta or description for these sites
+        img_node = tree.css_first(".post-thumbnail img, .poster img, .anime-poster img")
+        poster = None
+        if img_node:
+            poster = img_node.attributes.get("src") or img_node.attributes.get("data-src")
+
+        desc_node = tree.css_first(".description, .entry-content p, .synopsis")
+        description = desc_node.text().strip() if desc_node else ""
+
         anilist_id = None
         match = re.search(r"anilist\.co/anime/(\d+)", html)
         if match:
             anilist_id = int(match.group(1))
 
-        # Episodes list
         episodes = []
-        for ep_node in tree.css(".season-card a, .episodes-list a, a[href*='/episode/']"):
+        # Find all watch/episode links
+        for ep_node in tree.css("a[href*='/episode/'], a[href*='/watch/'], .episode-link"):
             ep_href = ep_node.attributes.get("href", "")
+            if not ep_href or "/series/" in ep_href:
+                continue
+
             ep_id = ep_href.rstrip("/").split("/")[-1]
-            ep_num_match = re.search(r"episode-(\d+)", ep_id)
-            ep_num = int(ep_num_match.group(1)) if ep_num_match else 1
+            # Try to extract episode number
+            num_match = re.search(r"episode-(\d+)", ep_id)
+            ep_num = int(num_match.group(1)) if num_match else 1
 
             episodes.append({
                 "episode_id": ep_id,
@@ -257,7 +272,7 @@ class AnimeworldScraper:
             "poster": poster,
             "synopsis": description,
             "anilist_id": anilist_id,
-            "episodes_list": episodes
+            "episodes_list": sorted(episodes, key=lambda x: x["number"])
         }
 
     def _parse_genres(self, html: str) -> list[str]:
